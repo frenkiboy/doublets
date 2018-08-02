@@ -7,6 +7,10 @@ output:
     toc: true
     toc_float: true
     toc_collapsed: false
+
+params:
+  dropout_singlet: 1
+  dropout_doublet: 1
 ---
 
 ```{r setup, include=FALSE}
@@ -22,8 +26,21 @@ knitr::opts_chunk$set(
 file = '/home/vfranke/Projects/VFranke_Doublets/VFranke_Doublets/Simulation.rmd'
 setwd(dirname(file))
 file = basename(file)
-outfile = paste(stringr::str_replace(file, '.rmd',''), format(Sys.time(), "%y%m%d"),'html', sep='.')
-rmarkdown::render(file, output_format='html_document', output_file = outfile)
+# outfile = paste(stringr::str_replace(file, '.rmd',''), format(Sys.time(), "%y%m%d"),'html', sep='.')
+
+dropout_doublet = c(1,2,3)
+for(dds in dropout_doublet){
+  print(dds)
+  dropout_singlet = dds + c(0:3)
+  for(dss in dropout_singlet){
+    print(dss)
+    dropout_params = list(
+      dropout_singlet = dss,
+      dropout_doublet = dds)
+    outfile = paste(stringr::str_replace(file, '.rmd',''),'dd',dds,'ds',dss,format(Sys.time(), "%y%m%d"),'html', sep='.')
+    rmarkdown::render(file, output_format='html_document', output_file = outfile, params = dropout_params)
+  }
+}
 ```
 
 
@@ -48,7 +65,7 @@ u = import('umap')
 ### Simulation
 
 #### Basic parameters
-```{r, echo = TRUE , message=FALSE}
+```{r, echo = TRUE , message=FALSE, warning=FALSE}
 sim = splatSimulate(
   nGenes = 500,
   batchCells = c(1000),
@@ -56,19 +73,22 @@ sim = splatSimulate(
   method = "groups",
   de.prob = 0.2
 )
+sim$type = 'singlet'
 ```
 
 #### Doublet and Dropout
-```{r, echo = TRUE, message=FALSE}
+```{r, echo = TRUE, message=FALSE, warning=FALSE}
 sl = list()
+dss = params$dropout_singlet
+dds = params$dropout_doublet
 for(i in c(0,.01,.03,.05,0.1,0.15,0.2)){
 
 message(i)
   if(i > 0){
     # determines the number of cells to sample
     nsamp = round(ncol(sim)/(1-i) - ncol(sim))
-    g1 = sample(which(sim$Group == 'Group1'), ncol(sim)*i)
-    g2 = sample(which(sim$Group == 'Group2'), ncol(sim)*i)
+    g1 = sample(which(sim$Group == 'Group1'), nsamp)
+    g2 = sample(which(sim$Group == 'Group2'), nsamp)
 
     sim_doub = sim[,g1]
     assays(sim_doub)$TrueCounts = assays(sim_doub)$TrueCounts + assays(sim[,g2])$TrueCounts
@@ -79,14 +99,10 @@ message(i)
     assays(sim_doub) = lapply(assays(sim_doub), function(x){colnames(x)=cname;x})
     sim_doub$type = 'doublet'
 
-    sim_sing = sim[,-sample(c(g1,g2), length(g1))]
-    sim_sing$type = 'singlet'
-
-    sim_all = cbind(sim_doub, sim_sing)
+    sim_all = cbind(sim_doub, sim)
     sim_all = normalise(sim_all)
   }else{
     sim_all = sim
-    sim_all$type = 'singlet'
   }
 
 
@@ -96,10 +112,10 @@ message(i)
 
   # d = log10(colSums(assays(sim_all)$counts))
   # d = max(d) - d + 2
-  d = ifelse(sim_all$type == 'singlet', 3, 1)
+  d = ifelse(sim_all$type == 'singlet', dss, dds)
 
-  param = setParam(param, 'dropout.mid', rpois(ncol(sim_all), d))
-  # param = setParam(param, 'dropout.mid', d)
+  # param = setParam(param, 'dropout.mid', rpois(ncol(sim_all), d))
+  param = setParam(param, 'dropout.mid', d)
   param = setParam(param, 'dropout.shape', rep(-1, ncol(sim_all)))
   param = setParam(param, 'dropout.type', 'cell')
 
@@ -220,8 +236,8 @@ for(i in sav_files){
   name = sub('SAVER.','',i)
   name = sub('.RDS','',name)
   r   = readRDS(i)
-  dat = r$estimate
-  dat = dat[, lseu[[name]]@meta.data$type == "singlet"]
+  dat_raw = r$estimate
+  dat = dat_raw[, lseu[[name]]@meta.data$type == "singlet"]
   seu = CreateSeuratObject(raw.data = dat)
   seu = NormalizeData(object = seu)
   exp_df = t(as.matrix(seu@data[rownames(seu@data) %in% feats, ]))
@@ -232,15 +248,18 @@ for(i in sav_files){
 
   rf_sav = randomForest(x=exp_df, y =Class)
 
-  dat_seu = lseu[[name]]@data
-  dat_seu = dat_seu[,lseu[[name]]@meta.data$type == "singlet"]
-  dat_seu_sel = as.matrix(t(dat_seu[feats,]))
-  Class_seu = as.factor(ifelse(rownames(dat_seu_sel) %in% meta$Cell, "G1", "G2"))
+  dat_mat = assays(sl[[name]])$TrueCounts
+  dat_mat = dat_mat[,sl[[name]]$type == 'singlet']
+  dat_seu = CreateSeuratObject(raw.data = dat_mat)
+  dat_seu = NormalizeData(object = dat_seu)
+  dat_df = t(as.matrix(dat_seu@data[rownames(dat_seu@data) %in% feats, ]))
+  dat_df = as.data.frame(exp_df)
+  Class_seu = as.factor(ifelse(rownames(dat_df) %in% meta$Cell, "G1", "G2"))
 
-  rf_seu = randomForest(x=dat_seu_sel, y = Class_seu)
+  rf_seu = randomForest(x=dat_df, y = Class_seu)
 
   mat_sav = as.matrix(seu@data)
-  mat_seu = as.matrix(dat_seu)
+  mat_seu = as.matrix(dat_seu@data)
   mcor = cor(mat_sav, mat_seu)
   vcor = mcor[row(mcor) == col(mcor)]
   dcor = data.frame(name = name, cor = vcor, gene_name = rownames(mcor))
@@ -251,11 +270,18 @@ for(i in sav_files){
     seu = mean(predict(rf_seu) != Class_seu)
   )
 
+  sav_doub = data.frame(
+    name    = name,
+    drouput = colSums(dat_raw == 0),
+    type    = lseu[[name]]@meta.data$type
+  )
+
   lres[[name]] = list(
     sav = rf_sav,
     seu = rf_seu,
     cor = dcor,
-    drf = drf)
+    drf = drf,
+    sav_doub = sav_doub)
 }
 ```
 
