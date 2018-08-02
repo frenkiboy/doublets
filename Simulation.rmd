@@ -1,0 +1,345 @@
+---
+title: "Simulation"
+author: "Vedran Franke"
+date: "7/31/2018"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_collapsed: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = FALSE,
+  message   = FALSE,
+  erroe     = FALSE,
+  fig.width =  3,
+  fig.height = 3)
+```
+
+```{r, eval=FALSE, include=FALSE}
+file = '/home/vfranke/Projects/VFranke_Doublets/VFranke_Doublets/Simulation.rmd'
+setwd(dirname(file))
+file = basename(file)
+outfile = paste(stringr::str_replace(file, '.rmd',''), format(Sys.time(), "%y%m%d"),'html', sep='.')
+rmarkdown::render(file, output_format='html_document', output_file = outfile)
+```
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(splatter)
+  library(dplyr)
+  library(Seurat)  
+  library(scater)
+  library(reticulate)
+  library(randomForest)
+})
+
+```
+
+```{r}
+conda = '/home/vfranke/bin/Software/miniconda3/bin/conda'
+use_condaenv(condaenv='umap', conda=conda)
+u = import('umap')
+```
+
+### Simulation
+
+#### Basic parameters
+```{r, echo = TRUE , message=FALSE}
+sim = splatSimulate(
+  nGenes = 500,
+  batchCells = c(1000),
+  group.prob = c(0.5, 0.5),
+  method = "groups",
+  de.prob = 0.2
+)
+```
+
+#### Doublet and Dropout
+```{r, echo = TRUE, message=FALSE}
+sl = list()
+for(i in c(0,.01,.03,.05,0.1,0.15,0.2)){
+
+message(i)
+  if(i > 0){
+    # determines the number of cells to sample
+    nsamp = round(ncol(sim)/(1-i) - ncol(sim))
+    g1 = sample(which(sim$Group == 'Group1'), ncol(sim)*i)
+    g2 = sample(which(sim$Group == 'Group2'), ncol(sim)*i)
+
+    sim_doub = sim[,g1]
+    assays(sim_doub)$TrueCounts = assays(sim_doub)$TrueCounts + assays(sim[,g2])$TrueCounts
+    assays(sim_doub)$counts     = assays(sim_doub)$counts     + assays(sim[,g2])$counts
+    cname = paste0(colData(sim_doub)$Cell, 'drop')
+    colData(sim_doub)$Cell = cname
+    rownames(colData(sim_doub)) = cname
+    assays(sim_doub) = lapply(assays(sim_doub), function(x){colnames(x)=cname;x})
+    sim_doub$type = 'doublet'
+
+    sim_sing = sim[,-sample(c(g1,g2), length(g1))]
+    sim_sing$type = 'singlet'
+
+    sim_all = cbind(sim_doub, sim_sing)
+    sim_all = normalise(sim_all)
+  }else{
+    sim_all = sim
+    sim_all$type = 'singlet'
+  }
+
+
+  param = newSplatParams(dropout.type = 'experiment',
+                         nGenes       = nrow(sim_all),
+                         batchCells   = ncol(sim_all))
+
+  # d = log10(colSums(assays(sim_all)$counts))
+  # d = max(d) - d + 2
+  d = ifelse(sim_all$type == 'singlet', 3, 1)
+
+  param = setParam(param, 'dropout.mid', rpois(ncol(sim_all), d))
+  # param = setParam(param, 'dropout.mid', d)
+  param = setParam(param, 'dropout.shape', rep(-1, ncol(sim_all)))
+  param = setParam(param, 'dropout.type', 'cell')
+
+  sim_drop = splatter:::splatSimDropout(
+    sim_all,
+    params=param)
+  sim_drop$type = sim_all$type[match(sim_drop$Cell, sim_all$Cell)]
+
+
+  name = paste0('d',i)
+  sl[[name]] = sim_drop
+}
+sl = sl[order(names(sl))]
+```
+
+### Percentage of doublets
+```{r, fig.width = 5}
+do.call(rbind, lapply(names(sl), function(x){
+   d = colData(sl[[x]])
+   d$name = x
+   return(d)
+   })) %>%
+ as.data.frame() %>%
+ ggplot(aes(name, fill = type)) +
+ geom_bar(position = 'dodge')
+```
+
+### Dropout distribution
+```{r}
+ss = sapply(sl, function(x)colSums(assays(x)$Dropout))
+summary(ss)
+```
+
+### Total counts distribution
+
+```{r, fig.width = 10}
+ldrop = lapply(names(sl), function(x){
+  data.frame(
+    name = x,
+    sc   = colSums(assays(sl[[x]])$counts),
+    type = colData(sl[[x]])$type
+  )
+
+})
+
+do.call(rbind, ldrop) %>%
+    ggplot(aes(sc, color=type)) +
+    geom_density(size=2) +
+  scale_x_log10() +
+  facet_wrap(~name, nrow=1)
+```
+
+#### Dropout rate distributions
+```{r, fig.width = 10}
+ldrop = lapply(names(sl), function(x){
+  data.frame(
+    name = x,
+    sc   = colSums(assays(sl[[x]])$counts == 0),
+    type = colData(sl[[x]])$type
+  )
+
+})
+
+do.call(rbind, ldrop) %>%
+    ggplot(aes(sc, color=type)) +
+    geom_density(size=2) +
+  facet_wrap(~name, nrow=1)
+```
+
+
+### Imputation
+
+```{r, message=FALSE, echo=FALSE, include=FALSE}
+library(SAVER)
+library(doParallel)
+
+cl = makeCluster(16, outfile = "")
+registerDoParallel(cl)
+
+for(i in names(sl)){
+  message(i)
+  sav = suppressMessages(saver(assays(sl[[i]])$counts))
+  saveRDS(sav, paste('SAVER', i, 'RDS', sep='.'))
+}
+stopCluster(cl)
+
+```
+
+```{r message=FALSE, echo=FALSE}
+lseu = list()
+for(name in names(sl)){
+  message(name)
+  seu <- CreateSeuratObject(assays(sl[[name]])$counts,
+                            min.cells = 0,
+                            min.genes = 0,
+                            is.expr   = 0)
+  meta = colData(sl[[name]])
+  meta = subset(meta, Cell %in% colnames(seu@raw.data))
+  seu@meta.data$Group = meta$Group
+  seu@meta.data$type  = meta$type  
+  seu <- SetAllIdent(seu, "Group")
+  seu <- NormalizeData(seu)
+  seu <- ScaleData(seu)
+  seu <- FindVariableGenes(object = seu, do.plot = FALSE)
+  seu <- RunPCA(seu, do.print=FALSE)
+  seu <- RunTSNE(seu, do.print=FALSE, check_duplicates=FALSE)
+  seu <- RunUMAP(seu, do.print=FALSE)
+  lseu[[name]] = seu
+}
+```
+
+```{r}
+feats = lseu[[1]]@var.genes
+sav_files = list.files(pattern='SAVER')
+lres = list()
+for(i in sav_files){
+
+  name = sub('SAVER.','',i)
+  name = sub('.RDS','',name)
+  r   = readRDS(i)
+  dat = r$estimate
+  dat = dat[, lseu[[name]]@meta.data$type == "singlet"]
+  seu = CreateSeuratObject(raw.data = dat)
+  seu = NormalizeData(object = seu)
+  exp_df = t(as.matrix(seu@data[rownames(seu@data) %in% feats, ]))
+  exp_df = as.data.frame(exp_df)
+  meta   = colData(sl[[name]])
+  meta   = subset(meta, Group == 'Group1')
+  Class = as.factor(ifelse(rownames(exp_df) %in% meta$Cell, "G1", "G2"))
+
+  rf_sav = randomForest(x=exp_df, y =Class)
+
+  dat_seu = lseu[[name]]@data
+  dat_seu = dat_seu[,lseu[[name]]@meta.data$type == "singlet"]
+  dat_seu_sel = as.matrix(t(dat_seu[feats,]))
+  Class_seu = as.factor(ifelse(rownames(dat_seu_sel) %in% meta$Cell, "G1", "G2"))
+
+  rf_seu = randomForest(x=dat_seu_sel, y = Class_seu)
+
+  mat_sav = as.matrix(seu@data)
+  mat_seu = as.matrix(dat_seu)
+  mcor = cor(mat_sav, mat_seu)
+  vcor = mcor[row(mcor) == col(mcor)]
+  dcor = data.frame(name = name, cor = vcor, gene_name = rownames(mcor))
+
+  drf = data.frame(
+    set = name,
+    sav = mean(predict(rf_sav) != Class),
+    seu = mean(predict(rf_seu) != Class_seu)
+  )
+
+  lres[[name]] = list(
+    sav = rf_sav,
+    seu = rf_seu,
+    cor = dcor,
+    drf = drf)
+}
+```
+
+```{r}
+lr = lapply(lres, '[[', 'sav')
+lr = lr[order(names(lr))]
+```
+
+```{r}
+lr_seu = lapply(lres, '[[', 'seu')
+lr_seu = lr_seu[order(names(lr_seu))]
+```
+
+#### Saver Random Forest
+```{r}
+drf = do.call(rbind, lapply(lres, '[[', 'drf')) %>%
+  dplyr::arrange(set)
+drf
+```
+
+#### Saver Density Plot
+```{r, fig.width = 5}
+dcor = do.call(rbind, lapply(lres, '[[', 'cor'))
+dcor %>%
+  ggplot(aes(cor, fill=name)) +
+  geom_histogram(alpha=.5) +
+  # scale_color_brewer(palette = 'RdBu')
+  scale_fill_brewer(palette = 'RdBu')
+```
+
+
+#### Saver Correlation Line Plot
+```{r, fig.width = 6, fig.height=3}
+dcor = do.call(rbind, lapply(lres, '[[', 'cor')) %>%
+  data.table::dcast(gene_name ~ name, value.var = 'cor')%>%
+  dplyr::filter(complete.cases(.)) %>%
+  tidyr::gather(doublet, value, -d0, -gene_name)
+
+dcor %>%
+  ggplot(aes(d0, value)) +
+  geom_point(size=.5) +
+  geom_abline(slope=1) +
+  facet_wrap(~doublet, nrow=1)+
+  xlim(c(0,1)) +
+  ylim(c(0,1))
+```
+
+
+#### tSNE
+```{r}
+dl = lapply(names(lseu), function(x){
+  s = lseu[[x]]
+  s@meta.data %>%
+    cbind(s@dr$tsne@cell.embeddings) %>%
+    dplyr::mutate(mult_perc = x)
+
+})
+dd = do.call(rbind,dl)
+```
+
+```{r fig.width = 6, fig.height=6}
+dd %>%
+  ggplot(aes(tSNE_1, tSNE_2, col=type)) +
+  geom_point(size=.5) +
+  scale_color_manual(values=c('red','gray')) +
+  facet_wrap(~mult_perc, ncol=2)
+```
+
+#### UMAP
+```{r}
+ul = lapply(names(lseu), function(x){
+  s = lseu[[x]]
+  s@meta.data %>%
+    cbind(s@dr$umap@cell.embeddings) %>%
+    dplyr::mutate(mult_perc = x)
+
+})
+ud = do.call(rbind,ul)
+```
+
+```{r,fig.width = 6, fig.height=6}
+ud %>%
+  ggplot(aes(UMAP1, UMAP2, col=type)) +
+  geom_point(size=.5) +
+  scale_color_manual(values=c('red','gray')) +
+  facet_wrap(~mult_perc, ncol=2)
+```
