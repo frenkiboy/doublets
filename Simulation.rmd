@@ -28,10 +28,10 @@ setwd(dirname(file))
 file = basename(file)
 # outfile = paste(stringr::str_replace(file, '.rmd',''), format(Sys.time(), "%y%m%d"),'html', sep='.')
 
-dropout_doublet = c(1,2,3)
+dropout_doublet = 1.5
 for(dds in dropout_doublet){
   print(dds)
-  dropout_singlet = dds + c(0:3)
+  dropout_singlet = dds + 0
   for(dss in dropout_singlet){
     print(dss)
     dropout_params = list(
@@ -93,6 +93,7 @@ message(i)
     sim_doub = sim[,g1]
     assays(sim_doub)$TrueCounts = assays(sim_doub)$TrueCounts + assays(sim[,g2])$TrueCounts
     assays(sim_doub)$counts     = assays(sim_doub)$counts     + assays(sim[,g2])$counts
+    assays(sim_doub)$CellMeans     = assays(sim_doub)$CellMeans     + assays(sim[,g2])$CellMeans
     cname = paste0(colData(sim_doub)$Cell, 'drop')
     colData(sim_doub)$Cell = cname
     rownames(colData(sim_doub)) = cname
@@ -105,7 +106,6 @@ message(i)
     sim_all = sim
   }
 
-
   param = newSplatParams(dropout.type = 'experiment',
                          nGenes       = nrow(sim_all),
                          batchCells   = ncol(sim_all))
@@ -115,8 +115,10 @@ message(i)
   d = ifelse(sim_all$type == 'singlet', dss, dds)
 
   # param = setParam(param, 'dropout.mid', rpois(ncol(sim_all), d))
-  param = setParam(param, 'dropout.mid', d)
-  param = setParam(param, 'dropout.shape', rep(-1, ncol(sim_all)))
+  # param = setParam(param, 'dropout.mid',   rep(3, ncol(sim_all)))
+  param = setParam(param, 'dropout.mid',   d)
+  param = setParam(param, 'dropout.shape', rnorm(ncol(sim_all), -1, .15))
+  # param = setParam(param, 'dropout.shape', rep(-1, ncol(sim_all)))
   param = setParam(param, 'dropout.type', 'cell')
 
   sim_drop = splatter:::splatSimDropout(
@@ -145,8 +147,9 @@ do.call(rbind, lapply(names(sl), function(x){
 
 ### Dropout distribution
 ```{r}
-ss = sapply(sl, function(x)colSums(assays(x)$Dropout))
-summary(ss)
+ss = sapply(sl, function(x)colSums(assays(x)$counts == 0))
+ss = sapply(ss, summary)
+ss
 ```
 
 ### Total counts distribution
@@ -312,6 +315,13 @@ dcor %>%
   scale_fill_brewer(palette = 'RdBu')
 ```
 
+```{r, fig.width = 6, fig.height=3}
+dcor %>%
+  ggplot(aes(cor, color=name)) +
+  geom_density(size=2) +
+  scale_color_brewer(palette = 'RdBu')
+  dev.off()
+```
 
 #### Saver Correlation Line Plot
 ```{r, fig.width = 6, fig.height=3}
